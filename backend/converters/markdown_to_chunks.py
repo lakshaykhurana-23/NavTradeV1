@@ -1,42 +1,83 @@
 """
-Convert Markdown files to JSON chunks with UUID tracking.
+Convert Markdown files to individual JSON chunk files with token counting.
+
+Each chunk is saved as a separate file in a document-specific folder.
 """
 import json
 import uuid
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import tiktoken
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from backend.config import CHUNK_HEADERS
 
+# Initialize tiktoken encoder
+enc = tiktoken.get_encoding("cl100k_base")
 
-def convert_markdown_to_chunks(input_path: str | Path, output_path: str | Path) -> Path:
+def count_tokens(text: str) -> int:
     """
-    Convert Markdown to hierarchical chunks with UUID tracking.
+    Count tokens in text using tiktoken.
     
-    This function:
-    1. Splits markdown by headers
-    2. Assigns unique IDs to each chunk
-    3. Tracks parent-child relationships
-    4. Saves as JSON
+    Args:
+        text: Text to count tokens for
+        
+    Returns:
+        Number of tokens
+    """
+    return len(enc.encode(text))
+
+
+def convert_markdown_to_chunks(
+    input_path: str | Path, 
+    output_dir: Path,
+    document_id: str,
+    custom_metadata: Optional[Dict[str, Any]] = None
+) -> tuple[Path, int]:
+    """
+    Convert Markdown to individual chunk JSON files with token counting.
+    
+    Output structure per chunk file:
+    {
+      "chunk": "text content",
+      "metadata": {
+        "chunk_id": "uuid",
+        "self": {...},
+        "parents": [...],
+        "document_id": "...",
+        "document_type": "...",
+        "document_description": "...",
+        "document_keywords": [...],
+        "category_ids": [...],
+        "tokens": "123"
+      }
+    }
+    
+    Storage structure:
+    data/chunks/
+    └── D01/
+        ├── chunk_001.json
+        ├── chunk_002.json
+        └── chunk_003.json
     
     Args:
         input_path: Path to input Markdown file
-        output_path: Path for output JSON file
+        output_dir: Directory to save chunk files (e.g., data/chunks/D01/)
+        document_id: Document ID (e.g., "D01")
+        custom_metadata: Optional dict of custom fields from config sheet
         
     Returns:
-        Path to the generated JSON file
+        Tuple of (output directory path, number of chunks created)
         
     Raises:
         FileNotFoundError: If input file doesn't exist
     """
     input_path = Path(input_path)
-    output_path = Path(output_path)
     
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
     
-    # Ensure output directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Create output directory for this document
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Read markdown file
     with open(input_path, 'r', encoding='utf-8') as f:
@@ -57,21 +98,21 @@ def convert_markdown_to_chunks(input_path: str | Path, output_path: str | Path) 
         return header_registry[key]
     
     # Process chunks
-    final_chunks = []
+    chunk_count = 0
     
-    for doc in docs:
-        metadata = doc.metadata
+    for idx, doc in enumerate(docs, start=1):
+        metadata_dict = doc.metadata
         
         # Detect chunk's header level
-        if "header3" in metadata:
+        if "header3" in metadata_dict:
             self_level = "h3"
-            self_title = metadata["header3"]
-        elif "header2" in metadata:
+            self_title = metadata_dict["header3"]
+        elif "header2" in metadata_dict:
             self_level = "h2"
-            self_title = metadata["header2"]
-        elif "header1" in metadata:
+            self_title = metadata_dict["header2"]
+        elif "header1" in metadata_dict:
             self_level = "h1"
-            self_title = metadata["header1"]
+            self_title = metadata_dict["header1"]
         else:
             self_level = None
             self_title = None
@@ -85,8 +126,8 @@ def convert_markdown_to_chunks(input_path: str | Path, output_path: str | Path) 
         # Build parent hierarchy (excluding self)
         parents = []
         for header_key, level in [("header1", "h1"), ("header2", "h2"), ("header3", "h3")]:
-            if header_key in metadata:
-                title = metadata[header_key]
+            if header_key in metadata_dict:
+                title = metadata_dict[header_key]
                 header_id = get_header_uuid(level, title)
                 
                 # Skip if this is the chunk's own ID
@@ -99,19 +140,40 @@ def convert_markdown_to_chunks(input_path: str | Path, output_path: str | Path) 
                     "title": title
                 })
         
-        # Create chunk object
-        final_chunks.append({
+        # Get chunk text
+        chunk_text = doc.page_content.strip()
+        
+        # Count tokens
+        token_count = count_tokens(chunk_text)
+        
+        # Build metadata object
+        chunk_metadata = {
             "chunk_id": chunk_id,
             "self": {
                 "header": self_level,
                 "title": self_title
             },
             "parents": parents,
-            "text": doc.page_content.strip()
-        })
+            "tokens": str(token_count)  # Store as string
+        }
+        
+        # Add custom metadata from config sheet if provided
+        if custom_metadata:
+            chunk_metadata.update(custom_metadata)
+        
+        # Create final chunk with new structure
+        final_chunk = {
+            "chunk": chunk_text,
+            "metadata": chunk_metadata
+        }
+        
+        # Save as individual file
+        chunk_filename = f"chunk_{idx:03d}.json"
+        chunk_filepath = output_dir / chunk_filename
+        
+        with open(chunk_filepath, 'w', encoding='utf-8') as f:
+            json.dump(final_chunk, f, indent=2, ensure_ascii=False)
+        
+        chunk_count += 1
     
-    # Save to JSON
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(final_chunks, f, indent=2, ensure_ascii=False)
-    
-    return output_path
+    return output_dir, chunk_count

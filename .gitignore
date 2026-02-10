@@ -59,3 +59,9 @@ logs/
 # Temporary files
 *.tmp
 *.bak
+
+# Ignore all data (including subfolders & files)
+data/
+
+# Ignore specific Excel config file
+DataSourceConfig.xlsx

@@ -1,22 +1,23 @@
 """
-FastAPI application for document processing and chat.
+FastAPI application - SIMPLIFIED with cache and batch processing
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-import time
 from pathlib import Path
+from typing import List
+import time
 
 from backend.models import ProcessRequest, ProcessResponse, Item, Model
-from backend.utils import detect_file_type, ensure_path_exists, generate_output_path
-from backend.config import INPUT_DIR, PDF_DIR, CHUNKS_DIR , MARKDOWN_DIR
-from backend.converters import (
-    convert_docx_to_pdf,
-    convert_html_to_pdf,
-    convert_pdf_to_markdown,
-    convert_markdown_to_chunks
-)
+from backend.config import INPUT_DIR
+from backend.simple_cache import SimpleCache  
+from backend.processor import DocumentProcessor
+
 
 app = FastAPI(title="Document Processor API", version="1.0.0")
+
+# Initialize cache and processor
+cache = SimpleCache()
+processor = DocumentProcessor()
 
 # Mock responses for chat models
 RESPONSE_MODEL_A = "This is the response from Model A. " * 10
@@ -40,17 +41,10 @@ async def root():
     """Root endpoint for health check."""
     return {"message": "Welcome to the Document Processor API!"}
 
+
 @app.post("/result")
 async def send_response(item: Item):
-    """
-    Stream chat response based on selected model.
-    
-    Args:
-        item: Chat request with user input, model, and thread ID
-        
-    Returns:
-        Streaming response with model output
-    """
+    """Stream chat response based on selected model."""
     if item.model == Model.MODEL_A:
         response = RESPONSE_MODEL_A
     elif item.model == Model.MODEL_B:
@@ -64,112 +58,114 @@ async def send_response(item: Item):
 
 
 # ============================================================================
-# DOCUMENT PROCESSING ENDPOINT
+# DOCUMENT PROCESSING ENDPOINTS
 # ============================================================================
 
 @app.post("/process", response_model=ProcessResponse)
 async def process_document(request: ProcessRequest):
     """
-    Process a document: convert to PDF (if needed) → Markdown → JSON chunks.
+    Process a single document with caching.
     
     Flow:
-    1. Detect file type (PDF, DOCX, or HTML) from data/input/
-    2. Convert to PDF if necessary → save to data/pdf/
-    3. Convert PDF to Markdown using Docling → save to data/markdown/
-    4. Convert Markdown to hierarchical chunks with UUIDs → save to data/chunks/
-    5. Return path to final chunks
-    
-    Args:
-        request: Processing request with file path (relative to data/input/)
-        
-    Returns:
-        ProcessResponse with status and output path
-        
-    Example:
-        Request: {"file_path": "report.docx"}
-        → Looks for: data/input/report.docx
-        → Creates: data/pdf/report.pdf
-        → Creates: data/markdown/report.md
-        → Creates: data/chunks/report.json
-        
-    Raises:
-        HTTPException: If file is not found or processing fails
+    1. Check cache first
+    2. If not cached, process: PDF → Markdown → Chunks
+    3. Save to cache
+    4. Return result
     """
     try:
-        # Handle both absolute and relative paths
-        # User can provide: "report.docx" or "/absolute/path/to/report.docx"
-        input_path = Path(request.file_path)
+        filename = Path(request.file_path).name
         
-        # If absolute path is provided, use it directly
-        # If relative path, assume it's relative to INPUT_DIR
-        if not input_path.is_absolute():
-            input_path = INPUT_DIR / request.file_path
-        
-        # Validate input file exists
-        if not input_path.exists():
-            # Provide helpful error message based on path type
-            if Path(request.file_path).is_absolute():
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"File not found: {request.file_path}"
-                )
-            else:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"File not found in data/input/: {request.file_path}. Please check that the file exists in the input directory."
-                )
-        
-        # Detect file type
-        file_type = detect_file_type(input_path)
-        if not file_type:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type: {input_path.suffix}"
+        # Check cache first
+        cached_path = cache.get(filename)
+        if cached_path:
+            return ProcessResponse(
+                success=True,
+                chunks_path=cached_path,
+                message=f"Retrieved from cache: {filename}",
+                file_type="cached"
             )
         
-        # Step 1: Convert to PDF if needed → save to data/pdf/
-        if file_type == "pdf":
-            pdf_path = PDF_DIR / input_path.name  # Copy to pdf folder for consistency
-            if input_path != pdf_path:
-                import shutil
-                shutil.copy2(input_path, pdf_path)
-        elif file_type == "docx":
-            pdf_path = generate_output_path(input_path, PDF_DIR, ".pdf")
-            convert_docx_to_pdf(input_path, pdf_path)
-        elif file_type == "html":
-            pdf_path = generate_output_path(input_path, PDF_DIR, ".pdf")
-            # Use async version of HTML to PDF converter
-            from backend.converters.html_to_pdf import convert_html_to_pdf_async
-            await convert_html_to_pdf_async(input_path, pdf_path)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}")
+        # Process file
+        result = await processor.process_file(request.file_path, request.enable_ocr)
         
-        # Step 2: Convert PDF to Markdown → save to data/markdown/
-        markdown_path = generate_output_path(pdf_path, MARKDOWN_DIR, ".md")
-        convert_pdf_to_markdown(pdf_path, markdown_path, enable_ocr=request.enable_ocr)
+        # Save to cache
+        cache.set(filename, result['chunks_path'])
         
-        # Step 3: Convert Markdown to chunks → save to data/chunks/
-        chunks_path = generate_output_path(markdown_path, CHUNKS_DIR, ".json")
-        convert_markdown_to_chunks(markdown_path, chunks_path)
-        
-        return ProcessResponse(
-            success=True,
-            chunks_path=str(chunks_path),
-            message=f"Successfully processed {input_path.name}",
-            file_type=file_type
-        )
+        return ProcessResponse(**result)
         
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+@app.post("/process-all")
+async def process_all_documents(enable_ocr: bool = False):
+    """
+    Process ALL documents in the input directory.
+    
+    Returns:
+        List of processed files with their status
+    """
+    results = []
+    
+    # Get all supported files
+    supported_extensions = ['.pdf', '.docx', '.html']
+    files = [
+        f for f in INPUT_DIR.iterdir() 
+        if f.is_file() and f.suffix.lower() in supported_extensions
+    ]
+    
+    for file in files:
+        filename = file.name
+        
+        try:
+            # Check cache
+            cached_path = cache.get(filename)
+            if cached_path:
+                results.append({
+                    'filename': filename,
+                    'status': 'cached',
+                    'chunks_path': cached_path
+                })
+                continue
+            
+            # Process file
+            result = await processor.process_file(file, enable_ocr)
+            cache.set(filename, result['chunks_path'])
+            
+            results.append({
+                'filename': filename,
+                'status': 'processed',
+                'chunks_path': result['chunks_path']
+            })
+            
+        except Exception as e:
+            results.append({
+                'filename': filename,
+                'status': 'failed',
+                'error': str(e)
+            })
+    
+    return {
+        'total_files': len(files),
+        'processed': len([r for r in results if r['status'] == 'processed']),
+        'cached': len([r for r in results if r['status'] == 'cached']),
+        'failed': len([r for r in results if r['status'] == 'failed']),
+        'results': results
+    }
+
+
+@app.post("/clear-cache")
+async def clear_cache():
+    """Clear the processing cache."""
+    cache.clear()
+    return {"message": "Cache cleared successfully"}
+
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
-
-
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=8000)
