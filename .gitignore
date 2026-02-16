@@ -65,3 +65,4 @@ data/
 
 # Ignore specific Excel config file
 DataSourceConfig.xlsx
+UpdatedConfig.xlsx

@@ -142,6 +142,25 @@ def convert_markdown_to_chunks(
         
         # Get chunk text
         chunk_text = doc.page_content.strip()
+
+        # Get the original content (without title)
+        original_content = doc.page_content.strip()
+
+        # Build the full chunk text with title prepended
+        if self_level and self_title:
+            # Map header level to markdown syntax
+            header_symbols = {
+                "h1": "#",
+                "h2": "##",
+                "h3": "###"
+            }
+            header_prefix = header_symbols.get(self_level, "#")
+            
+            # Prepend the title as a markdown header
+            chunk_text = f"{header_prefix} {self_title}\n\n{original_content}"
+        else:
+            # No title, use content as-is
+            chunk_text = original_content
         
         # Count tokens
         token_count = count_tokens(chunk_text)

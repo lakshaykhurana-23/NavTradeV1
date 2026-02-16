@@ -19,10 +19,13 @@ def create_converter(enable_ocr: bool = False) -> DocumentConverter:
     Returns:
         Configured DocumentConverter instance
     """
+    print("Creating converter with OCR enabled:", enable_ocr)
+    print("ocr" , enable_ocr)
+    print("Creating converter with OCR enabled:", enable_ocr)
     pipeline_options = PdfPipelineOptions(
         do_layout_analysis=True,
         extract_hierarchy=True,
-        do_ocr=enable_ocr,
+        do_ocr=True,
         do_table_structure=True
     )
     

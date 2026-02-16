@@ -5,6 +5,7 @@ Files in data/input/ are named like: D01.pdf, D02.html, D03.docx
 Config sheet has Id column matching the filename prefix (D01, D02, etc.)
 """
 import pandas as pd
+import json
 from pathlib import Path
 import logging
 from typing import Dict, List, Any, Optional
@@ -35,12 +36,14 @@ class InputFolderProcessor:
     
     # Column mapping from config sheet to metadata keys
     COLUMN_MAPPING = {
-        'Id': None,  # Used for matching, not in metadata
+        'Document ID': None,  # Used for matching, not in metadata
         'document_id': 'document_id',
-        'Format': 'document_type',
-        'Description': 'document_description',
-        'Keywords': 'document_keywords',
-        'Categories': 'category_ids'
+        'Document Type': 'document_type',
+        'Document Link': 'document_link',     
+        'Document Title': 'document_title' ,
+        'Document Description': 'document_description',
+        'Document Keywords': 'document_keywords',
+        'Document Categories': 'category_ids',
     }
     
     def __init__(self, config_file: Path):
@@ -70,6 +73,16 @@ class InputFolderProcessor:
         else:
             raise ValueError(f"Unsupported file type: {self.config_file.suffix}")
     
+    def _parse_json_array(self, value: str) -> List[str]:
+        """Parse JSON array string into list."""
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if item]
+            return []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
     def _parse_list_field(self, value: Any) -> List[str]:
         """
         Parse comma-separated string into list.
@@ -104,18 +117,18 @@ class InputFolderProcessor:
             True if at least one metadata field has content
         """
         # Check Keywords
-        if 'Keywords' in row.index and pd.notna(row['Keywords']) and str(row['Keywords']).strip():
+        if 'Document Keywords' in row.index and pd.notna(row['Document Keywords']):       
             return True
         
-        # Check Categories
-        if 'Categories' in row.index and pd.notna(row['Categories']) and str(row['Categories']).strip():
+        # Check Document Categories
+        if 'Document Categories' in row.index and pd.notna(row['Document Categories']):   
             return True
         
-        # Check Description
-        if 'Description' in row.index and pd.notna(row['Description']) and str(row['Description']).strip():
+        # Check Document Description
+        if 'Document Description' in row.index and pd.notna(row['Document Description']): 
             return True
         
-        return False
+        return False    
     
     def _extract_metadata(self, row: pd.Series) -> Dict[str, Any]:
         """
@@ -129,15 +142,15 @@ class InputFolderProcessor:
         """
         metadata = {}
         
-        # Add document_id from Id column
-        if 'Id' in row.index and pd.notna(row['Id']):
-            metadata['document_id'] = str(row['Id']).strip()
+        # Add document_id from Document ID column
+        if 'Document ID' in row.index and pd.notna(row['Document ID']):
+            metadata['document_id'] = str(row['Document ID']).strip()
         else:
             metadata['document_id'] = ""
         
         # Map other columns
         for col_name, meta_key in self.COLUMN_MAPPING.items():
-            if meta_key is None or col_name == 'Id':
+            if meta_key is None or col_name == 'Document ID':
                 continue
             
             if col_name not in row.index:
@@ -147,14 +160,35 @@ class InputFolderProcessor:
             
             # Skip NaN values
             if pd.isna(value):
-                metadata[meta_key] = "" if meta_key in ['document_type', 'document_description'] else []
+                metadata[meta_key] = "" if meta_key in ['document_type', 'document_description', 'document_link', 'document_title'] else []
                 continue
             
-            # Special handling for list fields
-            if col_name in ['Keywords', 'Categories']:
+            if col_name == 'Document Keywords':
+                # If it's already a list (from Excel with proper array), use it directly
+                if isinstance(value, list):
+                    metadata[meta_key] = value
+                # If it's a string, check if it's JSON formatted
+                elif isinstance(value, str):
+                    value_stripped = value.strip()
+                    # Check if it looks like a JSON array
+                    if value_stripped.startswith('[') and value_stripped.endswith(']'):
+                        # Try to parse as JSON
+                        parsed = self._parse_json_array(value_stripped)
+                        if parsed:
+                            metadata[meta_key] = parsed
+                        else:
+                            # If JSON parsing fails, fall back to comma-separated
+                            metadata[meta_key] = self._parse_list_field(value)
+                    else:
+                        # Normal comma-separated string
+                        metadata[meta_key] = self._parse_list_field(value)
+                else:
+                    metadata[meta_key] = []
+            # Handle Document Categories normally (needs parsing)
+            elif col_name == 'Document Categories':
                 metadata[meta_key] = self._parse_list_field(value)
             else:
-                # Regular string fields
+                # Regular string fields (document_type, document_description, etc.)
                 metadata[meta_key] = str(value).strip()
         
         return metadata
@@ -168,16 +202,16 @@ class InputFolderProcessor:
         """
         lookup = {}
         
-        if 'Id' not in self.df.columns:
-            logger.warning("No 'Id' column found in config sheet")
+        if 'Document ID' not in self.df.columns:
+            logger.warning("No 'Document ID' column found in config sheet")
             return lookup
         
         for idx, row in self.df.iterrows():
-            # Skip rows without Id
-            if pd.isna(row['Id']) or str(row['Id']).strip() == '':
+            # Skip rows without Document ID
+            if pd.isna(row['Document ID']) or str(row['Document ID']).strip() == '':
                 continue
             
-            doc_id = str(row['Id']).strip()
+            doc_id = str(row['Document ID']).strip()
             
             # Only include if has metadata
             if self._has_metadata(row):
